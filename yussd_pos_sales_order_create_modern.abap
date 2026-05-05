@@ -26,11 +26,11 @@ TYPES: BEGIN OF ty_header.
 TYPES:   account_o TYPE y0sd_posaccountid,
        END OF ty_header.
 
-TYPES: BEGIN OF ty_item,
+TYPES: BEGIN OF ty_item_full.
          accountid TYPE y0sd_posaccountid,
          kunwe     TYPE kunwe.
          INCLUDE TYPE y0sd_posordi.
-TYPES: END OF ty_item.
+TYPES: END OF ty_item_full.
 
 TYPES: BEGIN OF ty_upd,
          ordernum  TYPE y0sd_posordh-ordernum,
@@ -44,15 +44,17 @@ TYPES: BEGIN OF ty_customer,
          vkbur      TYPE knvv-vkbur,
        END OF ty_customer.
 
+TYPES: ty_t_out    TYPE STANDARD TABLE OF yussd_pos_so_create_alv WITH EMPTY KEY.
+TYPES: ty_t_header TYPE STANDARD TABLE OF ty_header WITH EMPTY KEY.
+TYPES: ty_t_item   TYPE STANDARD TABLE OF y0sd_posordi WITH EMPTY KEY.
+
 * Global Data
-DATA: gt_header    TYPE STANDARD TABLE OF ty_header,
+DATA: gt_header    TYPE ty_t_header,
       gs_header    TYPE ty_header,
-      gt_item      TYPE STANDARD TABLE OF y0sd_posordi,
+      gt_item      TYPE ty_t_item,
       gs_item      TYPE y0sd_posordi,
-      gt_item_conv TYPE STANDARD TABLE OF ty_item,
-      gs_item_conv TYPE ty_item,
-      gs_item_cpd  TYPE ty_item,
-      gt_out       TYPE STANDARD TABLE OF yussd_pos_so_create_alv,
+      gt_item_conv TYPE STANDARD TABLE OF ty_item_full,
+      gt_out       TYPE ty_t_out,
       gs_out       TYPE yussd_pos_so_create_alv,
       gt_upd       TYPE STANDARD TABLE OF ty_upd,
       gs_head      TYPE bapisdhd1,
@@ -67,6 +69,7 @@ DATA: gt_header    TYPE STANDARD TABLE OF ty_header,
       gt_soldto    TYPE STANDARD TABLE OF yussd_pos_soldto,
       gt_customer  TYPE STANDARD TABLE OF ty_customer,
       gs_customer  TYPE ty_customer,
+      gs_item_cpd  TYPE ty_item_full,
       g_salesorder TYPE vbeln_va,
       g_date       TYPE dats,
       g_seq        TYPE numc2,
@@ -182,9 +185,12 @@ FORM get_data.
   ENDLOOP.
 
   LOOP AT gt_item INTO DATA(ls_itm) WHERE orderqty > 0.
-    ASSIGN gt_header[ ordernum = ls_itm-ordernum ] TO FIELD-SYMBOL(<ls_h_ref>).
+    READ TABLE gt_header WITH KEY ordernum = ls_itm-ordernum ASSIGNING FIELD-SYMBOL(<ls_h_ref>).
     IF sy-subrc = 0.
-      APPEND VALUE #( BASE CORRESPONDING #( ls_itm ) accountid = <ls_h_ref>-soldtoid kunwe = ls_itm-shiplocid ) TO gt_item_conv.
+      DATA(ls_conv) = CORRESPONDING ty_item_full( ls_itm ).
+      ls_conv-accountid = <ls_h_ref>-soldtoid.
+      ls_conv-kunwe     = ls_itm-shiplocid.
+      APPEND ls_conv TO gt_item_conv.
     ENDIF.
   ENDLOOP.
 ENDFORM.
@@ -200,16 +206,16 @@ FORM post_data.
 
     REFRESH: gt_items, gt_texts, gt_upd.
     CLEAR: g_posnr, gs_customer, gs_item_cpd.
+    DATA(lv_first) = abap_true.
 
     LOOP AT GROUP <group> INTO DATA(ls_member).
-      IF sy-tabix = 1.
+      IF lv_first = abap_true.
         gs_header = VALUE #( gt_header[ ordernum = ls_member-ordernum ] OPTIONAL ).
         PERFORM header.
+        lv_first = abap_false.
       ENDIF.
 
-      IF ls_member-cdpcust IS NOT INITIAL.
-        gs_item_cpd = CORRESPONDING #( ls_member ).
-      ENDIF.
+      IF ls_member-cdpcust IS NOT INITIAL. gs_item_cpd = ls_member. ENDIF.
 
       gs_item = CORRESPONDING #( ls_member ).
       COLLECT VALUE ty_upd( ordernum = ls_member-ordernum shiplocid = ls_member-kunwe ) INTO gt_upd.
@@ -307,9 +313,10 @@ FORM create_order.
       LOOP AT gt_upd INTO DATA(ls_u).
         LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<fs_s>) WHERE ordernum = ls_u-ordernum AND shiplocid = ls_u-shiplocid.
           <fs_s> = VALUE #( BASE <fs_s> procstatus = '02' procstatustext = 'Posted' salesorder = g_salesorder procon = sy-datum ).
-          ASSIGN gt_header[ ordernum = ls_u-ordernum ] TO FIELD-SYMBOL(<fs_h_s>).
+          READ TABLE gt_header WITH KEY ordernum = ls_u-ordernum ASSIGNING FIELD-SYMBOL(<fs_h_s>).
           IF sy-subrc = 0.
-            PERFORM fill_protocoll USING <fs_h_s> <fs_s> VALUE bapiret2( gt_return[ type = 'S' ] DEFAULT VALUE #( gt_return[ 1 ] OPTIONAL ) ).
+            DATA(ls_ret_s) = VALUE bapiret2( gt_return[ type = 'S' ] DEFAULT VALUE #( gt_return[ 1 ] OPTIONAL ) ).
+            PERFORM fill_protocoll USING <fs_h_s> <fs_s> ls_ret_s.
             PERFORM unlock_header_tab USING <fs_h_s>.
             MODIFY y0sd_posordh FROM <fs_h_s>.
           ENDIF.
@@ -320,7 +327,7 @@ FORM create_order.
       LOOP AT gt_upd INTO ls_u.
         LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<fs_f>) WHERE ordernum = ls_u-ordernum AND shiplocid = ls_u-shiplocid.
           <fs_f> = VALUE #( BASE <fs_f> procstatus = '03' procstatustext = ls_err-message procon = sy-datum ).
-          ASSIGN gt_header[ ordernum = ls_u-ordernum ] TO FIELD-SYMBOL(<fs_h_f>).
+          READ TABLE gt_header WITH KEY ordernum = ls_u-ordernum ASSIGNING FIELD-SYMBOL(<fs_h_f>).
           IF sy-subrc = 0.
             PERFORM fill_protocoll USING <fs_h_f> <fs_f> ls_err.
             PERFORM unlock_header_tab USING <fs_h_f>.
@@ -333,7 +340,7 @@ FORM create_order.
     LOOP AT gt_upd INTO ls_u.
       LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<fs_sf>) WHERE ordernum = ls_u-ordernum AND shiplocid = ls_u-shiplocid.
         <fs_sf> = VALUE #( BASE <fs_sf> procstatus = '03' procstatustext = ls_err-message procon = sy-datum ).
-        ASSIGN gt_header[ ordernum = ls_u-ordernum ] TO FIELD-SYMBOL(<fs_h_sf>).
+        READ TABLE gt_header WITH KEY ordernum = ls_u-ordernum ASSIGNING FIELD-SYMBOL(<fs_h_sf>).
         IF sy-subrc = 0.
           PERFORM fill_protocoll USING <fs_h_sf> <fs_sf> ls_err.
           PERFORM unlock_header_tab USING <fs_h_sf>.
@@ -344,9 +351,10 @@ FORM create_order.
   ELSE. " Test Run Logging
     LOOP AT gt_upd INTO ls_u.
       LOOP AT gt_item INTO DATA(ls_t) WHERE ordernum = ls_u-ordernum AND shiplocid = ls_u-shiplocid.
-        ASSIGN gt_header[ ordernum = ls_u-ordernum ] TO FIELD-SYMBOL(<fs_h_t>).
+        READ TABLE gt_header WITH KEY ordernum = ls_u-ordernum ASSIGNING FIELD-SYMBOL(<fs_h_t>).
         IF sy-subrc = 0.
-          PERFORM fill_protocoll USING <fs_h_t> ls_t VALUE bapiret2( gt_return[ type = 'E' ] DEFAULT VALUE #( gt_return[ 1 ] OPTIONAL ) ).
+          DATA(ls_ret_e) = VALUE bapiret2( gt_return[ type = 'E' ] DEFAULT VALUE #( gt_return[ 1 ] OPTIONAL ) ).
+          PERFORM fill_protocoll USING <fs_h_t> ls_t ls_ret_e.
         ENDIF.
       ENDLOOP.
     ENDLOOP.
@@ -386,16 +394,27 @@ ENDFORM.
 *&      Form  AVAILABILITY_CHECK
 *&---------------------------------------------------------------------*
 FORM availability_check.
-  DATA: lt_item_in TYPE STANDARD TABLE OF bapiitemin, l_error TYPE char1.
+  DATA: lt_item_in    TYPE STANDARD TABLE OF bapiitemin,
+        lt_partner_sim TYPE STANDARD TABLE OF bapipartnr,
+        ls_head_sim   TYPE bapisdhead,
+        l_error       TYPE char1.
+
   LOOP AT gt_items INTO DATA(ls_itm).
     APPEND VALUE #( material = ls_itm-material target_qty = ls_itm-target_qty * 1000 req_qty = ls_itm-target_qty * 1000
                     target_qu = ls_itm-target_qu t_unit_iso = ls_itm-t_unit_iso sales_unit = ls_itm-target_qu plant = ls_itm-plant ) TO lt_item_in.
   ENDLOOP.
-  DATA(lt_part_in) = CORRESPONDING bapipartnr_tab( gt_partners ).
-  PERFORM simulate TABLES lt_item_in lt_part_in USING CORRESPONDING bapisdhead( gs_head ) CHANGING l_error.
+
+  MOVE-CORRESPONDING gt_partners TO lt_partner_sim.
+  MOVE-CORRESPONDING gs_head TO ls_head_sim.
+
+  PERFORM simulate TABLES lt_item_in lt_partner_sim USING ls_head_sim CHANGING l_error.
+
   IF l_error IS INITIAL.
-    gt_items = VALUE #( FOR i IN lt_item_in ( material = i-material target_qty = i-target_qty target_qu = i-target_qu
-                                              t_unit_iso = i-t_unit_iso sales_unit = i-target_qu plant = i-plant ) ).
+    REFRESH gt_items.
+    LOOP AT lt_item_in INTO DATA(ls_item_in).
+      APPEND VALUE #( material = ls_item_in-material target_qty = ls_item_in-target_qty target_qu = ls_item_in-target_qu
+                      t_unit_iso = ls_item_in-t_unit_iso sales_unit = ls_item_in-target_qu plant = ls_item_in-plant ) TO gt_items.
+    ENDLOOP.
   ELSE.
     LOOP AT gt_items ASSIGNING FIELD-SYMBOL(<fsi>). <fsi>-target_qty *= 1000. ENDLOOP.
   ENDIF.
@@ -437,15 +456,21 @@ FORM simulate TABLES pt_item STRUCTURE bapiitemin pt_partner STRUCTURE bapipartn
       ELSE.
         LOOP AT lt_o_it INTO DATA(ls_p) WHERE hg_lv_item = ls_o-itm_number.
           lv_k = ls_p-qty_req_dt / 1000.
-          IF lv_k = ls_p-req_qty. APPEND VALUE #( BASE ls_o material = ls_o-mat_entrd qty_req_dt = lv_k * 1000 req_qty = lv_k ) TO lt_s_it. lv_p -= lv_k.
+          IF lv_k = ls_p-req_qty.
+            DATA(ls_temp_s) = ls_o. ls_temp_s-material = ls_o-mat_entrd. ls_temp_s-qty_req_dt = lv_k * 1000. ls_temp_s-req_qty = lv_k.
+            APPEND ls_temp_s TO lt_s_it. lv_p -= lv_k.
           ELSE.
-            APPEND VALUE #( BASE ls_o material = ls_o-mat_entrd qty_req_dt = ls_p-qty_req_dt req_qty = ls_p-qty_req_dt / 1000 ) TO lt_s_it.
-            lv_p -= ( ls_p-qty_req_dt / 1000 ). APPEND VALUE #( BASE ls_o qty_req_dt = lv_p * 1000 req_qty = lv_p plant = gs_plant-werks ) TO lt_s_it. g_miss = 'X'.
+            DATA(ls_temp_s2) = ls_o. ls_temp_s2-material = ls_o-mat_entrd. ls_temp_s2-qty_req_dt = ls_p-qty_req_dt. ls_temp_s2-req_qty = ls_p-qty_req_dt / 1000.
+            APPEND ls_temp_s2 TO lt_s_it. lv_p -= ( ls_p-qty_req_dt / 1000 ).
+            DATA(ls_temp_s3) = ls_o. ls_temp_s3-qty_req_dt = lv_p * 1000. ls_temp_s3-req_qty = lv_p. ls_temp_s3-plant = gs_plant-werks.
+            APPEND ls_temp_s3 TO lt_s_it. g_miss = 'X'.
           ENDIF.
         ENDLOOP.
         IF sy-subrc <> 0.
-          APPEND VALUE #( BASE ls_o qty_req_dt = lv_k * 1000 req_qty = lv_k ) TO lt_s_it.
-          lv_p -= lv_k. APPEND VALUE #( BASE ls_o qty_req_dt = lv_p * 1000 req_qty = lv_p plant = gs_plant-werks ) TO lt_s_it. g_miss = 'X'.
+          DATA(ls_temp_s4) = ls_o. ls_temp_s4-qty_req_dt = lv_k * 1000. ls_temp_s4-req_qty = lv_k.
+          APPEND ls_temp_s4 TO lt_s_it. lv_p -= lv_k.
+          DATA(ls_temp_s5) = ls_o. ls_temp_s5-qty_req_dt = lv_p * 1000. ls_temp_s5-req_qty = lv_p. ls_temp_s5-plant = gs_plant-werks.
+          APPEND ls_temp_s5 TO lt_s_it. g_miss = 'X'.
         ENDIF.
       ENDIF.
     ENDLOOP.
@@ -460,19 +485,27 @@ FORM simulate TABLES pt_item STRUCTURE bapiitemin pt_partner STRUCTURE bapipartn
     ENDIF.
     LOOP AT lt_o_it INTO ls_o WHERE hg_lv_item IS INITIAL.
       lv_p = ls_o-req_qty. lv_k = ls_o-qty_req_dt / 1000.
-      IF lv_p = lv_k. APPEND VALUE #( CORRESPONDING #( ls_o ) target_qty = ls_o-qty_req_dt req_qty = ls_o-qty_req_dt ) TO pt_item.
+      IF lv_p = lv_k.
+        DATA(ls_it_item) = CORRESPONDING bapiitemin( ls_o ). ls_it_item-target_qty = ls_o-qty_req_dt. ls_it_item-req_qty = ls_o-qty_req_dt.
+        APPEND ls_it_item TO pt_item.
       ELSE.
         LOOP AT lt_o_it INTO ls_p WHERE hg_lv_item = ls_o-itm_number.
           lv_k = ls_p-qty_req_dt / 1000.
-          IF lv_k = ls_p-req_qty. APPEND VALUE #( CORRESPONDING #( ls_o ) material = ls_o-mat_entrd target_qty = lv_k * 1000 req_qty = lv_k * 1000 ) TO pt_item. lv_p -= lv_k.
+          IF lv_k = ls_p-req_qty.
+            DATA(ls_it_p) = CORRESPONDING bapiitemin( ls_o ). ls_it_p-material = ls_o-mat_entrd. ls_it_p-target_qty = lv_k * 1000. ls_it_p-req_qty = lv_k * 1000.
+            APPEND ls_it_p TO pt_item. lv_p -= lv_k.
           ELSE.
-            APPEND VALUE #( CORRESPONDING #( ls_o ) material = ls_o-mat_entrd target_qty = ls_p-qty_req_dt req_qty = ls_p-qty_req_dt ) TO pt_item.
-            lv_p -= ( ls_p-qty_req_dt / 1000 ). APPEND VALUE #( CORRESPONDING #( ls_o ) target_qty = lv_p * 1000 req_qty = lv_p * 1000 plant = gs_plant-werks ) TO pt_item. g_miss = 'X'.
+            DATA(ls_it_p2) = CORRESPONDING bapiitemin( ls_o ). ls_it_p2-material = ls_o-mat_entrd. ls_it_p2-target_qty = ls_p-qty_req_dt. ls_it_p2-req_qty = ls_p-qty_req_dt.
+            APPEND ls_it_p2 TO pt_item. lv_p -= ( ls_p-qty_req_dt / 1000 ).
+            DATA(ls_it_p3) = CORRESPONDING bapiitemin( ls_o ). ls_it_p3-target_qty = lv_p * 1000. ls_it_p3-req_qty = lv_p * 1000. ls_it_p3-plant = gs_plant-werks.
+            APPEND ls_it_p3 TO pt_item. g_miss = 'X'.
           ENDIF.
         ENDLOOP.
         IF sy-subrc <> 0.
-          APPEND VALUE #( CORRESPONDING #( ls_o ) target_qty = lv_k * 1000 req_qty = lv_k * 1000 ) TO pt_item.
-          lv_p -= lv_k. APPEND VALUE #( CORRESPONDING #( ls_o ) target_qty = lv_p * 1000 req_qty = lv_p * 1000 plant = gs_plant-werks ) TO pt_item. g_miss = 'X'.
+          DATA(ls_it_p4) = CORRESPONDING bapiitemin( ls_o ). ls_it_p4-target_qty = lv_k * 1000. ls_it_p4-req_qty = lv_k * 1000.
+          APPEND ls_it_p4 TO pt_item. lv_p -= lv_k.
+          DATA(ls_it_p5) = CORRESPONDING bapiitemin( ls_o ). ls_it_p5-target_qty = lv_p * 1000. ls_it_p5-req_qty = lv_p * 1000. ls_it_p5-plant = gs_plant-werks.
+          APPEND ls_it_p5 TO pt_item. g_miss = 'X'.
         ENDIF.
       ENDIF.
     ENDLOOP.
@@ -480,11 +513,19 @@ FORM simulate TABLES pt_item STRUCTURE bapiitemin pt_partner STRUCTURE bapipartn
   ENDIF.
 
   IF g_miss IS NOT INITIAL.
-    DATA(lt_it_sim) = VALUE bapiitemin_tab( FOR s IN lt_s_it ( VALUE #( CORRESPONDING #( s ) target_qty = s-qty_req_dt req_qty = s-qty_req_dt ) ) ).
+    DATA: lt_it_sim TYPE STANDARD TABLE OF bapiitemin.
+    LOOP AT lt_s_it INTO ls_o.
+      DATA(ls_it_s) = CORRESPONDING bapiitemin( ls_o ). ls_it_s-target_qty = ls_o-qty_req_dt. ls_it_s-req_qty = ls_o-qty_req_dt.
+      APPEND ls_it_s TO lt_it_sim.
+    ENDLOOP.
     PERFORM simulate TABLES lt_it_sim pt_partner USING p_head CHANGING p_error.
-    pt_item = CORRESPONDING #( lt_it_sim ).
+    REFRESH pt_item. MOVE-CORRESPONDING lt_it_sim TO pt_item.
   ELSE.
-    pt_item = VALUE #( FOR s IN lt_s_it ( VALUE #( CORRESPONDING #( s ) target_qty = s-qty_req_dt req_qty = s-qty_req_dt ) ) ).
+    REFRESH pt_item.
+    LOOP AT lt_s_it INTO ls_o.
+      DATA(ls_it_f) = CORRESPONDING bapiitemin( ls_o ). ls_it_f-target_qty = ls_o-qty_req_dt. ls_it_f-req_qty = ls_o-qty_req_dt.
+      APPEND ls_it_f TO pt_item.
+    ENDLOOP.
   ENDIF.
 ENDFORM.
 
@@ -498,8 +539,11 @@ FORM save_text USING p_comment p_vbeln.
   CALL FUNCTION 'RKD_WORD_WRAP' EXPORTING textline = p_comment outputlen = 132 TABLES out_lines = lt_w.
   LOOP AT lt_v INTO DATA(ls_v).
     DATA(lt_tl) = VALUE tline_tab( FOR line IN lt_w ( tdformat = '*' tdline = line ) ).
-    DATA(ls_i) = VALUE #( gt_items[ material = ls_v-matnr ] DEFAULT VALUE #( gt_items[ material = ls_v-matwa ] OPTIONAL ) ).
-    LOOP AT gt_texts INTO DATA(ls_txt) WHERE itm_number = ls_i-itm_number. APPEND VALUE #( tdformat = '*' tdline = ls_txt-text_line ) TO lt_tl. ENDLOOP.
+    READ TABLE gt_items WITH KEY material = ls_v-matnr ASSIGNING FIELD-SYMBOL(<ls_i>).
+    IF sy-subrc <> 0. READ TABLE gt_items WITH KEY material = ls_v-matwa ASSIGNING <ls_i>. ENDIF.
+    IF sy-subrc = 0.
+      LOOP AT gt_texts INTO DATA(ls_txt) WHERE itm_number = <ls_i>-itm_number. APPEND VALUE #( tdformat = '*' tdline = ls_txt-text_line ) TO lt_tl. ENDLOOP.
+    ENDIF.
     DATA(ls_th) = VALUE thead( tdobject = 'VBBP' tdname = |{ ls_v-vbeln }{ ls_v-posnr }| tdid = '0002' tdspras = sy-langu ).
     CALL FUNCTION 'SAVE_TEXT' EXPORTING header = ls_th insert = 'X' savemode_direct = 'X' TABLES lines = lt_tl EXCEPTIONS OTHERS = 5.
   ENDLOOP.
@@ -510,10 +554,9 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM fill_protocoll USING p_h TYPE ty_header p_i TYPE y0sd_posordi p_ret TYPE bapiret2.
   DATA(ls_out_p) = CORRESPONDING yussd_pos_so_create_alv( p_h ).
-  ls_out_p = CORRESPONDING #( BASE ( ls_out_p ) p_i ).
+  MOVE-CORRESPONDING p_i TO ls_out_p.
   ls_out_p-status = COND #( WHEN p_ret-type = 'E' THEN '@0A@' ELSE '@08@' ).
   ls_out_p-procstatustext = COND #( WHEN p_ret-type = 'E' THEN p_ret-message ELSE p_i-procstatustext ).
-
   SELECT SINGLE a~name_text FROM usr21 AS u INNER JOIN adrp AS a ON a~persnumber = u~persnumber INTO @ls_out_p-name_text WHERE u~bname = @p_h-changedby.
   APPEND ls_out_p TO gt_out.
 ENDFORM.
@@ -534,16 +577,18 @@ FORM get_log.
   SELECT * FROM y0sd_posordh INTO CORRESPONDING FIELDS OF TABLE @gt_out FOR ALL ENTRIES IN @lt_idx WHERE ordernum = @lt_idx-ordernum.
   IF sy-subrc = 0.
     SELECT * FROM y0sd_posordi INTO TABLE @gt_item FOR ALL ENTRIES IN @lt_idx WHERE ordernum = @lt_idx-ordernum AND orderitem = @lt_idx-orderitem.
-    DATA(lt_t) = VALUE STANDARD TABLE OF yussd_pos_so_create_alv( ).
+    DATA(lt_t_temp) TYPE ty_t_out.
     LOOP AT gt_out INTO DATA(ls_o).
       LOOP AT gt_item INTO DATA(ls_i) WHERE ordernum = ls_o-ordernum.
-        ASSIGN lt_idx[ ordernum = ls_o-ordernum orderitem = ls_i-orderitem ] TO FIELD-SYMBOL(<ls_r>).
-        APPEND VALUE yussd_pos_so_create_alv( BASE CORRESPONDING #( ls_i ) ordernum = ls_o-ordernum changedby = ls_o-changedby
-               name_text = COND #( WHEN sy-subrc = 0 THEN <ls_r>-name_text )
-               status = SWITCH #( ls_i-procstatus WHEN '1' THEN '@09@' WHEN '2' THEN '@08@' WHEN '3' THEN '@0A@' ) ) TO lt_t.
+        READ TABLE lt_idx WITH KEY ordernum = ls_o-ordernum orderitem = ls_i-orderitem ASSIGNING FIELD-SYMBOL(<ls_r>).
+        DATA(ls_p) = CORRESPONDING yussd_pos_so_create_alv( ls_i ).
+        ls_p-ordernum = ls_o-ordernum. ls_p-changedby = ls_o-changedby.
+        IF sy-subrc = 0. ls_p-name_text = <ls_r>-name_text. ENDIF.
+        ls_p-status = SWITCH #( ls_i-procstatus WHEN '1' THEN '@09@' WHEN '2' THEN '@08@' WHEN '3' THEN '@0A@' ELSE space ).
+        APPEND ls_p TO lt_t_temp.
       ENDLOOP.
     ENDLOOP.
-    gt_out = lt_t.
+    gt_out = lt_t_temp.
   ENDIF.
 ENDFORM.
 
@@ -561,10 +606,14 @@ ENDFORM.
 *&      Form  LOCKING/ALV/HELPERS
 *&---------------------------------------------------------------------*
 FORM lock_header_tab.
-  LOOP AT gt_header ASSIGNING FIELD-SYMBOL(<fh>).
-    DATA(ltx) = sy-tabix.
+  DATA(lt_temp_h) = gt_header. REFRESH gt_header.
+  LOOP AT lt_temp_h ASSIGNING FIELD-SYMBOL(<fh>).
     CALL FUNCTION 'ENQUEUE_EY0SD_POSORDH_LC' EXPORTING ordernum = <fh>-ordernum ordercycle = <fh>-ordercycle accountid = <fh>-accountid _scope = '1' EXCEPTIONS OTHERS = 3.
-    IF sy-subrc <> 0. APPEND VALUE #( CORRESPONDING #( <fh> ) procstatustext = TEXT-e01 status = '@0A@' ) TO gt_out. DELETE gt_header INDEX ltx. ENDIF.
+    IF sy-subrc <> 0.
+      APPEND VALUE #( CORRESPONDING #( <fh> ) procstatustext = TEXT-e01 status = '@0A@' ) TO gt_out.
+    ELSE.
+      APPEND <fh> TO gt_header.
+    ENDIF.
   ENDLOOP.
 ENDFORM.
 
@@ -582,7 +631,10 @@ FORM add_line_item_text USING p_n p_p.
 ENDFORM.
 
 FORM output.
-  DATA: lt_fc TYPE slis_t_fieldcat_alv. CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE' EXPORTING i_program_name = sy-repid i_structure_name = 'YUSSD_POS_SO_CREATE_ALV' CHANGING ct_fieldcat = lt_fc.
+  DATA: lt_fc TYPE slis_t_fieldcat_alv,
+        ls_variant TYPE disvariant.
+
+  CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE' EXPORTING i_program_name = sy-repid i_structure_name = 'YUSSD_POS_SO_CREATE_ALV' CHANGING ct_fieldcat = lt_fc.
   LOOP AT lt_fc ASSIGNING FIELD-SYMBOL(<ff>).
     <ff>-ddictxt = 'M'. <ff>-key = space.
     CASE <ff>-fieldname.
@@ -591,17 +643,24 @@ FORM output.
       WHEN 'SOLDTOID'. <ff>-seltext_s = <ff>-seltext_m = <ff>-seltext_l = 'deviant Sold-to'.
     ENDCASE.
   ENDLOOP.
-  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY' EXPORTING i_callback_program = sy-repid i_callback_pf_status_set = 'STATUS' i_callback_user_command = 'USER_COMMAND' is_layout = VALUE #( zebra = 'X' colwidth_optimize = 'X' ) it_fieldcat = lt_fc i_save = 'A' TABLES t_outtab = gt_out.
+
+  ls_variant-report = sy-repid.
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+    EXPORTING i_callback_program = sy-repid i_callback_pf_status_set = 'STATUS' i_callback_user_command = 'USER_COMMAND'
+              is_layout = VALUE #( zebra = 'X' colwidth_optimize = 'X' ) it_fieldcat = lt_fc i_save = 'A' is_variant = ls_variant
+    TABLES    t_outtab = gt_out.
 ENDFORM.
 
 FORM user_command USING r_u LIKE sy-ucomm rs_s TYPE slis_selfield.
   IF r_u = '&IC1' AND rs_s-fieldname = 'SALESORDER'.
-    DATA(lv_v) = VALUE #( gt_out[ rs_s-tabindex ]-salesorder OPTIONAL ).
-    IF lv_v IS NOT INITIAL. SET PARAMETER ID 'AUN' FIELD lv_v. CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN. ENDIF.
+    READ TABLE gt_out INDEX rs_s-tabindex INTO DATA(ls_o).
+    IF sy-subrc = 0 AND ls_o-salesorder IS NOT INITIAL. SET PARAMETER ID 'AUN' FIELD ls_o-salesorder. CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN. ENDIF.
   ENDIF.
 ENDFORM.
 
-FORM status USING p_extab TYPE slis_t_extab. SET PF-STATUS 'STANDARD' EXCLUDING p_extab. ENDFORM.
+FORM status USING p_extab TYPE slis_t_extab.
+  SET PF-STATUS 'STANDARD' EXCLUDING p_extab.
+ENDFORM.
 
 FORM error_cust_pos.
   LOOP AT gt_upd INTO DATA(ls_u).
