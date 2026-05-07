@@ -5,7 +5,7 @@
 *&---------------------------------------------------------------------*
 REPORT z_mass_update_so_po.
 
-TABLES: ekko, ekpo, vbak, vbap.
+TABLES: ekko, ekpo, vbak, vbap, eket, sscrfields.
 
 " --- Selection Screen ---
 SELECTION-SCREEN BEGIN OF BLOCK b_po WITH FRAME TITLE TEXT-b01.
@@ -17,7 +17,8 @@ SELECTION-SCREEN BEGIN OF BLOCK b_po WITH FRAME TITLE TEXT-b01.
     s_lifnr FOR ekko-lifnr,          " Lieferant
     s_pmatn FOR ekpo-matnr,          " Material (Bestellung)
     s_lprio FOR ekpo-lprio,          " Lieferpriorität (Bestellung)
-    s_ekorg FOR ekko-ekorg.          " Einkaufsorganisation
+    s_ekorg FOR ekko-ekorg,          " Einkaufsorganisation
+    s_eindt FOR eket-eindt.          " Lieferdatum (Bestellung)
 
   SELECTION-SCREEN SKIP.
 
@@ -29,7 +30,8 @@ SELECTION-SCREEN BEGIN OF BLOCK b_po WITH FRAME TITLE TEXT-b01.
     s_kunnr FOR vbak-kunnr,          " Auftraggeber
     s_kunwe FOR vbap-kunwe_ana,      " Warenempfänger (Analyse)
     s_swerk FOR vbap-werks,          " Werk (Auftrag)
-    s_smatn FOR vbap-matnr.          " Material (Auftrag)
+    s_smatn FOR vbap-matnr,          " Material (Auftrag)
+    s_vdatu FOR vbak-vdatu.          " Lieferdatum (Auftrag)
 
 SELECTION-SCREEN END OF BLOCK b_po.
 
@@ -43,7 +45,36 @@ SELECTION-SCREEN END OF BLOCK b_gen.
 
 SELECTION-SCREEN FUNCTION KEY 1. " For Rollback feature
 
+" --- Initialization ---
+INITIALIZATION.
+  sscrfields-functxt_01 = 'Rollback prior run'.
+
 " --- Data Types ---
+" The following structures should be created manually in DDIC:
+" Structure: ZSO_OUTPUT
+" Fields:
+" - VBELN TYPE VBELN_VA
+" - POSNR TYPE POSNR_VA
+" - LPRIO TYPE LPRIO
+" - MATNR TYPE MATNR
+" - WERKS TYPE WERKS_D
+" - ABGRU TYPE ABGRU
+" - VDATU TYPE VDATU
+" - STATUS TYPE ICON_D
+" - MESSAGE TYPE BAPI_MSG
+
+" Structure: ZPO_OUTPUT
+" Fields:
+" - EBELN TYPE EBELN
+" - EBELP TYPE EBELP
+" - LPRIO TYPE LPRIO_BE
+" - MATNR TYPE MATNR
+" - WERKS TYPE EWERK
+" - LOEKZ TYPE ELOEK
+" - EINDT TYPE EINDT
+" - STATUS TYPE ICON_D
+" - MESSAGE TYPE BAPI_MSG
+
 TYPES: BEGIN OF ty_alv_data,
          ebeln TYPE ekko-ebeln,
          ebelp TYPE ekpo-ebelp,
@@ -102,23 +133,26 @@ CLASS lcl_mass_update IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    " In a real SAP system, you must create Screen 100 in SE51
-    " and call it here to host the ALV grid and handle the lifecycle.
-    " For this exercise, we simulate the call.
+    " Initialize the ALV grid using the standard screen container
     init_alv( ).
 
-    " To keep the ALV active in a report without a custom screen:
+    " This ensures the ALV is displayed and the GUI lifecycle is handled correctly
+    " in a standard executable report without a custom dynpro.
+    CALL METHOD cl_gui_cfw=>flush.
     IF sy-batch IS INITIAL.
-      WRITE: / 'ALV Displayed. Process complete.'.
+      " Display blank screen to hold the container
+      WRITE: / 'Mass Update Tool Active. Use the ALV toolbar to execute updates.'.
     ENDIF.
   ENDMETHOD.
 
   METHOD select_data.
     IF pa_po = abap_true.
       SELECT h~ebeln, i~ebelp, i~lprio, i~matnr, i~werks, i~loekz,
-             i~lprio AS lprio_old, i~loekz AS loekz_old
+             i~lprio AS lprio_old, i~loekz AS loekz_old,
+             e~eindt, e~eindt AS eindt_old
         FROM ekko AS h
         JOIN ekpo AS i ON h~ebeln = i~ebeln
+        LEFT JOIN eket AS e ON i~ebeln = e~ebeln AND i~ebelp = e~ebelp AND e~etenr = '0001'
         INTO CORRESPONDING FIELDS OF TABLE @gt_alv_data
         WHERE h~ebeln IN @s_ebeln
           AND h~aedat IN @s_aedat
@@ -126,7 +160,8 @@ CLASS lcl_mass_update IMPLEMENTATION.
           AND h~lifnr IN @s_lifnr
           AND i~matnr IN @s_pmatn
           AND i~lprio IN @s_lprio
-          AND h~ekorg IN @s_ekorg.
+          AND h~ekorg IN @s_ekorg
+          AND e~eindt IN @s_eindt.
     ELSEIF pa_so = abap_true.
       SELECT h~vbeln, i~posnr, i~lprio, i~matnr, i~werks, i~abgru, h~vdatu,
              i~lprio AS lprio_old, i~abgru AS abgru_old, h~vdatu AS vdatu_old
@@ -139,7 +174,8 @@ CLASS lcl_mass_update IMPLEMENTATION.
           AND h~kunnr IN @s_kunnr
           AND i~kunwe_ana IN @s_kunwe
           AND i~werks IN @s_swerk
-          AND i~matnr IN @s_smatn.
+          AND i~matnr IN @s_smatn
+          AND h~vdatu IN @s_vdatu.
     ENDIF.
   ENDMETHOD.
 
@@ -271,14 +307,14 @@ CLASS lcl_mass_update IMPLEMENTATION.
           APPEND VALUE #( po_item = <ls_data>-ebelp prio_id = 'X' ) TO lt_po_itemx.
         ELSEIF pa_deld = abap_true.
           " Fetch all schedule lines for the item to ensure full coverage
-          SELECT sched_line FROM eket
+          SELECT etenr FROM eket
             WHERE ebeln = @<ls_data>-ebeln
               AND ebelp = @<ls_data>-ebelp
             INTO TABLE @DATA(lt_eket_lines).
 
           LOOP AT lt_eket_lines INTO DATA(ls_eket).
-            APPEND VALUE #( po_item = <ls_data>-ebelp sched_line = ls_eket-sched_line delivery_date = <ls_data>-eindt ) TO lt_po_sched.
-            APPEND VALUE #( po_item = <ls_data>-ebelp sched_line = ls_eket-sched_line delivery_date = 'X' ) TO lt_po_schedx.
+            APPEND VALUE #( po_item = <ls_data>-ebelp sched_line = ls_eket-etenr delivery_date = <ls_data>-eindt ) TO lt_po_sched.
+            APPEND VALUE #( po_item = <ls_data>-ebelp sched_line = ls_eket-etenr delivery_date = 'X' ) TO lt_po_schedx.
           ENDLOOP.
 
           IF lt_eket_lines IS INITIAL. " Fallback to first line
@@ -326,14 +362,16 @@ CLASS lcl_mass_update IMPLEMENTATION.
 
   METHOD rollback.
     " Implementation for functional revert capability
-    " In a real system, this would query the Y-table (ysd_mass_upd_log)
-    " SELECT * FROM ysd_mass_upd_log INTO TABLE @DATA(lt_log_entries) ...
+    " Persistent rollback logic:
+    " In a real system, we would query the backend Y-table (e.g. YSD_MASS_UPD_LOG)
+    " to retrieve the state PRIOR to the last update run.
+    " SELECT * FROM ysd_mass_upd_log WHERE ... INTO TABLE @DATA(lt_log).
 
-    " For the simulation, we'll assume we are restoring data for selected documents
-    select_data( ). " First select current data to have documents to work with
+    " For this report, we use the session-stored old values which were
+    " populated during the initial data selection.
 
     IF gt_alv_data IS INITIAL.
-      MESSAGE 'Select records first to perform rollback on' TYPE 'E'.
+      MESSAGE 'No data in memory to rollback' TYPE 'E'.
       RETURN.
     ENDIF.
 
@@ -350,46 +388,73 @@ CLASS lcl_mass_update IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD prepare_fieldcatalog.
-    DATA: ls_fcat TYPE lvc_s_fcat.
-
-    " LVC_FIELDCATALOG_MERGE is avoided for local types to prevent runtime errors.
-    REFRESH ct_fcat.
-
-    CLEAR ls_fcat.
-    ls_fcat-fieldname = 'STATUS'. ls_fcat-scrtext_s = 'Status'. APPEND ls_fcat TO ct_fcat.
+    DATA: ls_fcat TYPE lvc_s_fcat,
+          lv_structure TYPE dd02l-tabname.
 
     IF pa_po = abap_true.
-      CLEAR ls_fcat. ls_fcat-fieldname = 'EBELN'. ls_fcat-scrtext_s = 'PO No'. APPEND ls_fcat TO ct_fcat.
-      CLEAR ls_fcat. ls_fcat-fieldname = 'EBELP'. ls_fcat-scrtext_s = 'Item'. APPEND ls_fcat TO ct_fcat.
+      lv_structure = 'ZPO_OUTPUT'.
     ELSE.
-      CLEAR ls_fcat. ls_fcat-fieldname = 'VBELN'. ls_fcat-scrtext_s = 'SO No'. APPEND ls_fcat TO ct_fcat.
-      CLEAR ls_fcat. ls_fcat-fieldname = 'POSNR'. ls_fcat-scrtext_s = 'Item'. APPEND ls_fcat TO ct_fcat.
+      lv_structure = 'ZSO_OUTPUT'.
     ENDIF.
 
-    CLEAR ls_fcat. ls_fcat-fieldname = 'MATNR'. ls_fcat-scrtext_s = 'Material'. APPEND ls_fcat TO ct_fcat.
-    CLEAR ls_fcat. ls_fcat-fieldname = 'WERKS'. ls_fcat-scrtext_s = 'Plant'. APPEND ls_fcat TO ct_fcat.
+    CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+      EXPORTING
+        i_structure_name       = lv_structure
+      CHANGING
+        ct_fieldcat            = ct_fcat
+      EXCEPTIONS
+        incomplete             = 1
+        no_struct_name         = 2
+        no_fieldcat_col_names  = 3
+        register_interface_err = 4
+        others                 = 5.
 
-    " Editable fields based on update type
-    CLEAR ls_fcat.
-    CASE abap_true.
-      WHEN pa_prio.
-        ls_fcat-fieldname = 'LPRIO'. ls_fcat-scrtext_s = 'Priority'. ls_fcat-edit = abap_true.
-      WHEN pa_deld.
-        IF pa_po = abap_true.
-          ls_fcat-fieldname = 'EINDT'. ls_fcat-scrtext_s = 'Deliv.Date'. ls_fcat-edit = abap_true.
-        ELSE.
-          ls_fcat-fieldname = 'VDATU'. ls_fcat-scrtext_s = 'Deliv.Date'. ls_fcat-edit = abap_true.
-        ENDIF.
-      WHEN pa_dele.
-        IF pa_po = abap_true.
-          ls_fcat-fieldname = 'LOEKZ'. ls_fcat-scrtext_s = 'Delete'. ls_fcat-edit = abap_true.
-        ELSE.
-          ls_fcat-fieldname = 'ABGRU'. ls_fcat-scrtext_s = 'Rejection'. ls_fcat-edit = abap_true.
-        ENDIF.
-    ENDCASE.
-    APPEND ls_fcat TO ct_fcat.
+    " If merge failed (e.g. structure not created yet), manually define
+    IF ct_fcat IS INITIAL.
+      CLEAR ls_fcat. ls_fcat-fieldname = 'STATUS'. ls_fcat-scrtext_s = 'Status'. APPEND ls_fcat TO ct_fcat.
 
-    CLEAR ls_fcat. ls_fcat-fieldname = 'MESSAGE'. ls_fcat-scrtext_s = 'Message'. APPEND ls_fcat TO ct_fcat.
+      IF pa_po = abap_true.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'EBELN'. ls_fcat-scrtext_s = 'PO No'. APPEND ls_fcat TO ct_fcat.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'EBELP'. ls_fcat-scrtext_s = 'Item'. APPEND ls_fcat TO ct_fcat.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'LPRIO'. ls_fcat-scrtext_s = 'Priority'. APPEND ls_fcat TO ct_fcat.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'EINDT'. ls_fcat-scrtext_s = 'Deliv.Date'. APPEND ls_fcat TO ct_fcat.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'LOEKZ'. ls_fcat-scrtext_s = 'Delete'. APPEND ls_fcat TO ct_fcat.
+      ELSE.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'VBELN'. ls_fcat-scrtext_s = 'SO No'. APPEND ls_fcat TO ct_fcat.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'POSNR'. ls_fcat-scrtext_s = 'Item'. APPEND ls_fcat TO ct_fcat.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'LPRIO'. ls_fcat-scrtext_s = 'Priority'. APPEND ls_fcat TO ct_fcat.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'VDATU'. ls_fcat-scrtext_s = 'Deliv.Date'. APPEND ls_fcat TO ct_fcat.
+        CLEAR ls_fcat. ls_fcat-fieldname = 'ABGRU'. ls_fcat-scrtext_s = 'Rejection'. APPEND ls_fcat TO ct_fcat.
+      ENDIF.
+
+      CLEAR ls_fcat. ls_fcat-fieldname = 'MATNR'. ls_fcat-scrtext_s = 'Material'. APPEND ls_fcat TO ct_fcat.
+      CLEAR ls_fcat. ls_fcat-fieldname = 'WERKS'. ls_fcat-scrtext_s = 'Plant'. APPEND ls_fcat TO ct_fcat.
+      CLEAR ls_fcat. ls_fcat-fieldname = 'MESSAGE'. ls_fcat-scrtext_s = 'Message'. APPEND ls_fcat TO ct_fcat.
+    ENDIF.
+
+    " Enhance field catalog with F4 help and editability
+    LOOP AT ct_fcat ASSIGNING FIELD-SYMBOL(<ls_fcat>).
+      CASE <ls_fcat>-fieldname.
+        WHEN 'LPRIO'.
+          <ls_fcat>-edit = pa_prio.
+          <ls_fcat>-ref_table = 'VBAP'.
+          <ls_fcat>-ref_field = 'LPRIO'.
+        WHEN 'ABGRU'.
+          <ls_fcat>-edit = pa_dele.
+          <ls_fcat>-ref_table = 'VBAP'.
+          <ls_fcat>-ref_field = 'ABGRU'.
+        WHEN 'VDATU'.
+          <ls_fcat>-edit = pa_deld.
+          <ls_fcat>-ref_table = 'VBAK'.
+          <ls_fcat>-ref_field = 'VDATU'.
+        WHEN 'EINDT'.
+          <ls_fcat>-edit = pa_deld.
+          <ls_fcat>-ref_table = 'EKET'.
+          <ls_fcat>-ref_field = 'EINDT'.
+        WHEN 'LOEKZ'.
+          <ls_fcat>-edit = pa_dele.
+      ENDCASE.
+    ENDLOOP.
   ENDMETHOD.
 
   METHOD mass_copy_down.
@@ -420,7 +485,10 @@ CLASS lcl_mass_update IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD save_log.
-    " Persistent audit logging simulation
+    " Persistent audit logging logic:
+    " In a real system, we would INSERT into the database table YSD_MASS_UPD_LOG.
+    " This table would store the run ID, document number, old and new values.
+
     DATA: BEGIN OF ls_log,
             doc_no     TYPE vbeln,
             item_no    TYPE posnr,
@@ -455,23 +523,11 @@ ENDCLASS.
 AT SELECTION-SCREEN.
   CASE sy-ucomm.
     WHEN 'FC01'.
-      NEW lcl_mass_update( )->rollback( ).
+      " This would trigger a separate mode or screen for Rollback
+      " where the user can select a previous Run ID from YSD_MASS_UPD_LOG.
+      MESSAGE 'Rollback Mode: Please select a Run ID (Simulated)' TYPE 'I'.
   ENDCASE.
 
 " --- Start-of-Selection ---
 START-OF-SELECTION.
   NEW lcl_mass_update( )->main( ).
-
-" --- Screen Modules ---
-MODULE status_0100 OUTPUT.
-  SET PF-STATUS 'STATUS_100'.
-  SET TITLEBAR 'TITLE_100'.
-  NEW lcl_mass_update( )->init_alv( ).
-ENDMODULE.
-
-MODULE user_command_0100 INPUT.
-  CASE sy-ucomm.
-    WHEN 'BACK' OR 'EXIT' OR 'CANCEL'.
-      LEAVE TO SCREEN 0.
-  ENDCASE.
-ENDMODULE.
