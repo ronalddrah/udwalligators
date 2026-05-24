@@ -137,17 +137,17 @@ CLASS zcl_sd_dispatch_report IMPLEMENTATION.
            END OF ty_partner,
            tt_partners TYPE SORTED TABLE OF ty_partner WITH NON-UNIQUE KEY vbeln,
            BEGIN OF ty_bseg,
-             belnr TYPE belnr_d, vbeln TYPE vbeln_vf, zfbdt TYPE dzfbdt, bukrs TYPE bukrs,
+             vbeln TYPE vbeln_vf, belnr TYPE belnr_d, zfbdt TYPE dzfbdt, bukrs TYPE bukrs,
            END OF ty_bseg,
-           tt_bseg TYPE SORTED TABLE OF ty_bseg WITH NON-UNIQUE KEY vbeln,
+           tt_bseg TYPE HASHED TABLE OF ty_bseg WITH UNIQUE KEY vbeln,
            BEGIN OF ty_mch1,
              matnr TYPE matnr, charg TYPE charg_d, hsdat TYPE hsdat, vfdat TYPE vfdat,
            END OF ty_mch1,
            tt_mch1 TYPE SORTED TABLE OF ty_mch1 WITH NON-UNIQUE KEY matnr charg,
            BEGIN OF ty_tzont,
-             spras TYPE spras, land1 TYPE land1, zone1 TYPE zone1, vtext TYPE vtext,
+             zone1 TYPE zone1, spras TYPE spras, land1 TYPE land1, vtext TYPE vtext,
            END OF ty_tzont,
-           tt_tzont TYPE SORTED TABLE OF ty_tzont WITH NON-UNIQUE KEY zone1.
+           tt_tzont TYPE HASHED TABLE OF ty_tzont WITH UNIQUE KEY zone1.
 
     DATA lt_partners TYPE tt_partners.
     DATA lt_bseg     TYPE tt_bseg.
@@ -189,7 +189,7 @@ CLASS zcl_sd_dispatch_report IMPLEMENTATION.
           WHEN 'RG'. <ls_out>-kunrg = ls_pt-kunnr. <ls_out>-name_rg = ls_pt-name1.
           WHEN 'SP'. <ls_out>-kunsp = ls_pt-lifnr. <ls_out>-name_sp = ls_pt-name1.
         ENDCASE.
-        READ TABLE lt_tzont INTO DATA(ls_tz) WITH KEY zone1 = ls_pt-lzone.
+        READ TABLE lt_tzont INTO DATA(ls_tz) WITH TABLE KEY zone1 = ls_pt-lzone.
         IF sy-subrc = 0. <ls_out>-desti = ls_tz-vtext. ENDIF.
       ENDLOOP.
 
@@ -197,7 +197,7 @@ CLASS zcl_sd_dispatch_report IMPLEMENTATION.
                                                    charg = <ls_bill>-charg.
       IF sy-subrc = 0. <ls_out>-hsdat = ls_mch-hsdat. <ls_out>-vfdat = ls_mch-vfdat. ENDIF.
 
-      READ TABLE lt_bseg INTO DATA(ls_bs) WITH KEY vbeln = <ls_bill>-vbeln.
+      READ TABLE lt_bseg INTO DATA(ls_bs) WITH TABLE KEY vbeln = <ls_bill>-vbeln.
       IF sy-subrc = 0.
         <ls_out>-zfbdt = ls_bs-zfbdt.
         IF <ls_out>-zfbdt IS NOT INITIAL. <ls_out>-overdue = sy-datum - <ls_out>-zfbdt. ENDIF.
@@ -222,8 +222,9 @@ CLASS zcl_sd_dispatch_report IMPLEMENTATION.
     IF lt_delivery IS INITIAL. RETURN. ENDIF.
 
     " Aggregate split deliveries (uecha logic)
-    DATA lt_delivery_sorted TYPE SORTED TABLE OF LINE OF lt_delivery WITH NON-UNIQUE KEY vbeln uecha.
-    lt_delivery_sorted = lt_delivery.
+    DATA lt_delivery_with_key TYPE STANDARD TABLE OF LINE OF lt_delivery
+      WITH EMPTY KEY WITH NON-UNIQUE SORTED KEY split_key COMPONENTS vbeln uecha.
+    lt_delivery_with_key = lt_delivery.
 
     LOOP AT lt_delivery ASSIGNING FIELD-SYMBOL(<ls_del>) WHERE uecha IS INITIAL.
       APPEND INITIAL LINE TO mt_output ASSIGNING FIELD-SYMBOL(<ls_out>).
@@ -234,8 +235,8 @@ CLASS zcl_sd_dispatch_report IMPLEMENTATION.
       <ls_out>-knumv = <ls_del>-invoiceknumv. <ls_out>-sfakn = <ls_del>-cancellationdoc.
 
       " Sum quantities from splits
-      LOOP AT lt_delivery_sorted INTO DATA(ls_split)
-           WHERE vbeln = <ls_del>-vbeln AND uecha = <ls_del>-posnr.
+      LOOP AT lt_delivery_with_key INTO DATA(ls_split)
+           USING KEY split_key WHERE vbeln = <ls_del>-vbeln AND uecha = <ls_del>-posnr.
         IF ls_split-umvkn IS NOT INITIAL.
           <ls_out>-lfimg += ls_split-lfimg * ls_split-umvkz / ls_split-umvkn.
         ENDIF.
@@ -261,7 +262,9 @@ CLASS zcl_sd_dispatch_report IMPLEMENTATION.
     DATA lt_knumv TYPE TABLE OF knumv.
     LOOP AT mt_output INTO DATA(ls_out) WHERE knumv IS NOT INITIAL. APPEND ls_out-knumv TO lt_knumv. ENDLOOP.
     SORT lt_knumv. DELETE ADJACENT DUPLICATES FROM lt_knumv.
-    LOOP AT lt_knumv INTO DATA(lv_k). lt_sel = VALUE #( BASE lt_sel ( fieldname = 'KNUMV' value = lv_k ) ). ENDLOOP.
+    LOOP AT lt_knumv INTO DATA(lv_k).
+      APPEND VALUE #( fieldname = 'KNUMV' value = lv_k ) TO lt_sel.
+    ENDLOOP.
 
     TRY.
         cl_prc_result_factory=>get_instance( )->get_prc_result( )->get_price_element_db(
@@ -309,12 +312,12 @@ CLASS zcl_sd_dispatch_report IMPLEMENTATION.
     TYPES: BEGIN OF ty_mbew,
              matnr TYPE matnr, stprs TYPE stprs, peinh TYPE peinh, bwkey TYPE bwkey,
            END OF ty_mbew,
-           tt_mbew TYPE SORTED TABLE OF ty_mbew WITH NON-UNIQUE KEY matnr,
+           tt_mbew TYPE HASHED TABLE OF ty_mbew WITH UNIQUE KEY matnr,
            BEGIN OF ty_mbewh,
              matnr TYPE matnr, lfgja TYPE lfgja, lfmon TYPE lfmon,
              stprs TYPE stprs, peinh TYPE peinh, bwkey TYPE bwkey,
            END OF ty_mbewh,
-           tt_mbewh TYPE SORTED TABLE OF ty_mbewh WITH NON-UNIQUE KEY matnr lfgja lfmon.
+           tt_mbewh TYPE HASHED TABLE OF ty_mbewh WITH UNIQUE KEY matnr lfgja lfmon.
 
     DATA lt_mbew  TYPE tt_mbew.
     DATA lt_mbewh TYPE tt_mbewh.
@@ -329,11 +332,13 @@ CLASS zcl_sd_dispatch_report IMPLEMENTATION.
       INTO TABLE @lt_mbewh.
 
     LOOP AT mt_output ASSIGNING FIELD-SYMBOL(<ls_out>).
-      READ TABLE lt_mbew INTO DATA(ls_m) WITH KEY matnr = <ls_out>-matnr.
+      READ TABLE lt_mbew INTO DATA(ls_m) WITH TABLE KEY matnr = <ls_out>-matnr.
       IF sy-subrc = 0 AND ls_m-stprs IS NOT INITIAL.
         <ls_out>-price = ls_m-stprs / ls_m-peinh.
       ELSE.
-        READ TABLE lt_mbewh INTO DATA(ls_mh) WITH KEY matnr = <ls_out>-matnr lfgja = <ls_out>-year lfmon = <ls_out>-month.
+        READ TABLE lt_mbewh INTO DATA(ls_mh) WITH TABLE KEY matnr = <ls_out>-matnr
+                                                          lfgja = <ls_out>-year
+                                                          lfmon = <ls_out>-month.
         IF sy-subrc = 0. <ls_out>-price = ls_mh-stprs / ls_mh-peinh. ENDIF.
       ENDIF.
     ENDLOOP.
