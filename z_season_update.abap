@@ -237,21 +237,61 @@ CLASS lcl_report IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD update_database.
+    DATA: ls_headdata    TYPE bapimathead,
+          lt_extensionin TYPE TABLE OF bapipare,
+          ls_extensionin TYPE bapipare,
+          ls_te_mara     TYPE bapi_te_mara,
+          ls_te_marax    TYPE bapi_te_marax,
+          lt_return      TYPE TABLE OF bapiret2.
+
     DATA(lv_updated) = 0.
+
     LOOP AT mt_mara_update INTO DATA(ls_update) WHERE zzseason_n IS NOT INITIAL.
-      UPDATE mara SET zzseason   = @ls_update-zzseason_n,
-                      zzsyear    = @ls_update-zzsyear_n,
-                      zzsyear_to = @ls_update-zzsyear_to_n
-        WHERE matnr = @ls_update-matnr.
-      IF sy-subrc = 0.
+      CLEAR: ls_headdata, lt_extensionin, lt_return, ls_te_mara, ls_te_marax.
+
+      ls_headdata-material = ls_update-matnr.
+
+      " Extension Data
+      ls_te_mara-material   = ls_update-matnr.
+      ls_te_mara-zzseason   = ls_update-zzseason_n.
+      ls_te_mara-zzsyear    = ls_update-zzsyear_n.
+      ls_te_mara-zzsyear_to = ls_update-zzsyear_to_n.
+
+      ls_extensionin-structure = 'BAPI_TE_MARA'.
+      ls_extensionin-valuepart1 = ls_te_mara.
+      APPEND ls_extensionin TO lt_extensionin.
+
+      " Extension Flags
+      ls_te_marax-material   = ls_update-matnr.
+      ls_te_marax-zzseason   = abap_true.
+      ls_te_marax-zzsyear    = abap_true.
+      ls_te_marax-zzsyear_to = abap_true.
+
+      ls_extensionin-structure = 'BAPI_TE_MARAX'.
+      ls_extensionin-valuepart1 = ls_te_marax.
+      APPEND ls_extensionin TO lt_extensionin.
+
+      CALL FUNCTION 'BAPI_MATERIAL_SAVEDATA'
+        EXPORTING
+          headdata    = ls_headdata
+        TABLES
+          return      = lt_return
+          extensionin = lt_extensionin.
+
+      IF NOT line_exists( lt_return[ type = 'E' ] ) AND NOT line_exists( lt_return[ type = 'A' ] ).
+        CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+          EXPORTING
+            wait = abap_true.
         lv_updated = lv_updated + 1.
+      ELSE.
+        " In batch mode, consider logging these errors
       ENDIF.
     ENDLOOP.
+
     IF lv_updated > 0.
-      COMMIT WORK.
-      MESSAGE |{ lv_updated } records updated.| TYPE 'S'.
+      MESSAGE |{ lv_updated } records updated via BAPI.| TYPE 'S'.
     ELSE.
-      MESSAGE 'No records to update' TYPE 'S'.
+      MESSAGE 'No records to update or all BAPI calls failed.' TYPE 'S'.
     ENDIF.
   ENDMETHOD.
 ENDCLASS.
